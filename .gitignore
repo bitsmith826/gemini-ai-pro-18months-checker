@@ -1,0 +1,15 @@
+# Dependensi
+node_modules/
+
+# Hasil output & data pribadi
+results/
+.env
+links.txt
+
+# Log & Profil browser
+*.log
+user_data/
+
+# OS cache
+.DS_Store
+Thumbs.db
