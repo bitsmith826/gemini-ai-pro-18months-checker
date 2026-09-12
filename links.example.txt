@@ -1,4 +1,0 @@
-# Masukkan daftar link Google One / Gemini activation di bawah ini (1 link per baris)
-# Baris yang diawali dengan tanda pagar (#) akan diabaikan oleh program
-# Contoh:
-# https://one.google.com/activate-plan/subscription/new/AQCpi...

@@ -2,22 +2,116 @@ import fs from 'fs';
 import path from 'path';
 import puppeteer from 'puppeteer';
 import chalk from 'chalk';
-import { config } from './config.js';
+import dotenv from 'dotenv';
 
-// Format tanggal lokal (YYYY-MM-DD HH:mm:ss)
-function getLocalDateTime() {
-  const now = new Date();
+dotenv.config({ quiet: true });
+
+const config = {
+  engine: (process.env.ENGINE || 'FETCH').toUpperCase(),
+  cookie: process.env.GOOGLE_COOKIE || '',
+  keywords: (process.env.TARGET_KEYWORDS || 'Langganan sudah digunakan, Link langganan ini sudah digunakan, sudah digunakan')
+    .split(',')
+    .map(k => k.trim())
+    .filter(Boolean),
+  matchMode: (process.env.MATCH_MODE || 'ANY').toUpperCase(),
+  caseSensitive: process.env.CASE_SENSITIVE === 'true',
+  headless: process.env.HEADLESS !== 'false',
+  timeoutMs: parseInt(process.env.TIMEOUT_MS || '30000', 10),
+  delayMs: parseInt(process.env.DELAY_MS || '1000', 10),
+  linksFile: process.env.LINKS_FILE || 'links.txt',
+  saveScreenshotOnFound: process.env.SAVE_SCREENSHOT_ON_FOUND === 'true',
+  resultsDir: 'results'
+};
+
+// Format tanggal lokal ramah baca (DD MMM YYYY, HH:mm:ss WIB)
+function formatHumanDateTime(date = new Date()) {
+  const d = date.getDate();
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+  const m = months[date.getMonth()];
+  const y = date.getFullYear();
   const pad = n => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${d} ${m} ${y}, ${time} WIB`;
 }
 
-// Inisialisasi & reset folder hasil per batch agar selalu rapi
+// Format tanggal standar database/CSV (YYYY-MM-DD HH:mm:ss)
+function getLocalDateTime(date = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// Format jam saja (HH:mm:ss)
+function formatTimeOnly(date = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// Otomatis memperbarui cookie Google via endpoint RotateCookies
+async function tryRotateCookies(currentCookie) {
+  if (!currentCookie) return null;
+
+  try {
+    const res = await fetch('https://accounts.google.com/RotateCookies', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'cookie': currentCookie,
+        'origin': 'https://accounts.google.com',
+        'referer': 'https://accounts.google.com/RotateCookiesPage?og_pid=459&rot=3&origin=https%3A%2F%2Fone.google.com&exp_id=0',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36'
+      },
+      body: JSON.stringify([459, '7550153183429483664'])
+    });
+
+    if (!res.ok) return null;
+
+    const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+    if (!setCookies || setCookies.length === 0) return null;
+
+    // Gabungkan cookie lama dengan cookie baru yang dirotasi
+    const cookieMap = new Map();
+    currentCookie.split(';').forEach(c => {
+      const parts = c.trim().split('=');
+      const k = parts[0];
+      const v = parts.slice(1).join('=');
+      if (k) cookieMap.set(k, v);
+    });
+
+    for (const sc of setCookies) {
+      const nameVal = sc.split(';')[0];
+      const parts = nameVal.trim().split('=');
+      const k = parts[0];
+      const v = parts.slice(1).join('=');
+      if (k) cookieMap.set(k, v);
+    }
+
+    const newCookie = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+
+    // Simpan cookie baru kembali ke file .env
+    try {
+      const envPath = path.resolve('.env');
+      if (fs.existsSync(envPath)) {
+        let envContent = fs.readFileSync(envPath, 'utf8');
+        envContent = envContent.replace(/GOOGLE_COOKIE=".*?"/s, `GOOGLE_COOKIE="${newCookie}"`);
+        fs.writeFileSync(envPath, envContent, 'utf8');
+      }
+    } catch (e) {
+      // Abaikan jika gagal tulis ke .env
+    }
+
+    return newCookie;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Inisialisasi folder hasil
 function initResultsDirectory() {
   if (!fs.existsSync(config.resultsDir)) {
     fs.mkdirSync(config.resultsDir, { recursive: true });
   }
 
-  // Header CSV yang terstruktur rapi untuk Excel
+  // Header CSV dengan format UTF-8 BOM untuk Excel
   const csvPath = path.join(config.resultsDir, 'summary.csv');
   fs.writeFileSync(
     csvPath,
@@ -25,12 +119,9 @@ function initResultsDirectory() {
     'utf8'
   );
 
-  // Reset file output batch
+  // Reset file output utama
   fs.writeFileSync(path.join(config.resultsDir, 'available_links.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(config.resultsDir, 'available.txt'), '', 'utf8');
   fs.writeFileSync(path.join(config.resultsDir, 'used.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(config.resultsDir, 'need_login.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(config.resultsDir, 'errors.txt'), '', 'utf8');
 }
 
 // Baca daftar link dari file
@@ -63,11 +154,11 @@ function logResultToFile(filename, line) {
 }
 
 // Append record ke CSV dengan kolom rapi
-function logResultToCsv(no, status, paket = '-', promo = '-', berakhir = '-', url = '') {
+function logResultToCsv(no, status, paket = '-', promo = '-', berakhir = '-', url = '', waktu = new Date()) {
   const csvPath = path.join(config.resultsDir, 'summary.csv');
-  const waktu = getLocalDateTime();
+  const waktuStr = getLocalDateTime(waktu);
   const esc = str => `"${String(str || '-').replace(/"/g, '""')}"`;
-  const row = `${no},${esc(waktu)},${esc(status)},${esc(paket)},${esc(promo)},${esc(berakhir)},${esc(url)}\n`;
+  const row = `${no},${esc(waktuStr)},${esc(status)},${esc(paket)},${esc(promo)},${esc(berakhir)},${esc(url)}\n`;
   fs.appendFileSync(csvPath, row, 'utf8');
 }
 
@@ -124,7 +215,7 @@ function parseCookiesForPuppeteer(cookieStr, domain = '.google.com') {
 async function checkWithFetch(links) {
   const stats = { total: links.length, available: 0, used: 0, needLogin: 0, error: 0 };
 
-  const headers = {
+  const getHeaders = (cookieVal) => ({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -132,12 +223,11 @@ async function checkWithFetch(links) {
     'Sec-Fetch-Mode': 'navigate',
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
-  };
+    'Upgrade-Insecure-Requests': '1',
+    ...(cookieVal ? { 'Cookie': cookieVal } : {})
+  });
 
-  if (config.cookie) {
-    headers['Cookie'] = config.cookie;
-  }
+  let activeCookie = config.cookie;
 
   for (let i = 0; i < links.length; i++) {
     const itemNo = i + 1;
@@ -146,31 +236,61 @@ async function checkWithFetch(links) {
       rawUrl = 'https://' + rawUrl;
     }
 
+    // Otomatis normalisasi link serviceactivation.google.com ke one.google.com
+    if (rawUrl.includes('serviceactivation.google.com/subscription/new/')) {
+      rawUrl = rawUrl.replace(
+        'serviceactivation.google.com/subscription/new/',
+        'one.google.com/activate-plan/subscription/new/'
+      );
+    }
+
+    const now = new Date();
+    const timeBadge = chalk.gray(`[${formatTimeOnly(now)}]`);
     const counter = `[${itemNo}/${links.length}]`;
     const shortUrl = formatShortUrl(rawUrl);
 
     try {
-      const response = await fetch(rawUrl, {
-        headers,
+      let response = await fetch(rawUrl, {
+        headers: getHeaders(activeCookie),
         redirect: 'follow'
       });
 
-      const finalUrl = response.url;
-      const htmlText = await response.text();
-      const title = extractTitle(htmlText);
+      let finalUrl = response.url;
+      let htmlText = await response.text();
+      let title = extractTitle(htmlText);
 
-      // 1. Cek login redirect
-      const isLoginRedirect = finalUrl.includes('accounts.google.com') ||
+      // Cek apakah terlempar ke login
+      let isLoginRedirect = finalUrl.includes('accounts.google.com') ||
         title.toLowerCase().includes('sign in') ||
         title.toLowerCase().includes('masuk - akun google');
 
+      // Jika terlempar ke login, coba auto-refresh via RotateCookies sekali
+      if (isLoginRedirect) {
+        const rotated = await tryRotateCookies(activeCookie);
+        if (rotated) {
+          activeCookie = rotated;
+          config.cookie = rotated;
+          // Retry link dengan cookie yang baru dirotasi
+          response = await fetch(rawUrl, {
+            headers: getHeaders(activeCookie),
+            redirect: 'follow'
+          });
+          finalUrl = response.url;
+          htmlText = await response.text();
+          title = extractTitle(htmlText);
+          isLoginRedirect = finalUrl.includes('accounts.google.com') ||
+            title.toLowerCase().includes('sign in') ||
+            title.toLowerCase().includes('masuk - akun google');
+        }
+      }
+
       if (isLoginRedirect) {
         stats.needLogin++;
-        console.log(chalk.magenta.bold(`${counter} ⚠️  [NEED_LOGIN]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.magenta.bold('⚠️  [NEED_LOGIN]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Cookie login belum aktif / kedaluwarsa\n'));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Sesi cookie kedaluwarsa (perlu login ulang)\n'));
         logResultToFile('need_login.txt', rawUrl);
-        logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl);
+        logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl, now);
         continue;
       }
 
@@ -188,17 +308,17 @@ async function checkWithFetch(links) {
 
       if (isUsed) {
         stats.used++;
-        console.log(chalk.yellow.bold(`${counter} ✗ [USED]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
         logResultToFile('used.txt', rawUrl);
-        logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl);
+        logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
       } else {
         // 3. AVAILABLE / VALID
         stats.available++;
         const promo = extractGoogleOneDetails(htmlText);
 
-        console.log(chalk.green.bold(`${counter} ✓ [AVAILABLE / VALID]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Paket    : `) + chalk.cyan(promo.plan));
         console.log(chalk.gray(`      Promo    : `) + chalk.green.bold(promo.duration));
@@ -208,20 +328,17 @@ async function checkWithFetch(links) {
         }
         console.log('');
 
-        // Simpan hanya link murni di available_links.txt untuk kemudahan copy-paste
         logResultToFile('available_links.txt', rawUrl);
-        // Simpan link + detail di available.txt
-        logResultToFile('available.txt', `${rawUrl} | ${promo.summary}`);
-        logResultToCsv(itemNo, 'AVAILABLE', promo.plan, promo.duration, promo.expiry, rawUrl);
+        logResultToCsv(itemNo, 'AVAILABLE', promo.plan, promo.duration, promo.expiry, rawUrl, now);
       }
 
     } catch (err) {
       stats.error++;
-      console.log(chalk.red.bold(`${counter} ! [ERROR]`));
+      console.log(`${counter} ${timeBadge} ` + chalk.red.bold('! [ERROR]'));
       console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
       console.log(chalk.gray(`      Pesan    : `) + chalk.red(err.message) + '\n');
       logResultToFile('errors.txt', `${rawUrl} | Error: ${err.message}`);
-      logResultToCsv(itemNo, 'ERROR', '-', '-', '-', rawUrl);
+      logResultToCsv(itemNo, 'ERROR', '-', '-', '-', rawUrl, now);
     }
 
     if (i < links.length - 1 && config.delayMs > 0) {
@@ -271,6 +388,16 @@ async function checkWithPuppeteer(links) {
       rawUrl = 'https://' + rawUrl;
     }
 
+    // Normalisasi serviceactivation -> one.google.com
+    if (rawUrl.includes('serviceactivation.google.com/subscription/new/')) {
+      rawUrl = rawUrl.replace(
+        'serviceactivation.google.com/subscription/new/',
+        'one.google.com/activate-plan/subscription/new/'
+      );
+    }
+
+    const now = new Date();
+    const timeBadge = chalk.gray(`[${formatTimeOnly(now)}]`);
     const counter = `[${itemNo}/${links.length}]`;
     const shortUrl = formatShortUrl(rawUrl);
 
@@ -308,11 +435,11 @@ async function checkWithPuppeteer(links) {
 
       if (isLoginRedirect) {
         stats.needLogin++;
-        console.log(chalk.magenta.bold(`${counter} ⚠️  [NEED_LOGIN]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.magenta.bold('⚠️  [NEED_LOGIN]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Cookie login belum aktif / kedaluwarsa\n'));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Sesi login belum aktif\n'));
         logResultToFile('need_login.txt', rawUrl);
-        logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl);
+        logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl, now);
         continue;
       }
 
@@ -333,17 +460,17 @@ async function checkWithPuppeteer(links) {
 
       if (isUsed) {
         stats.used++;
-        console.log(chalk.yellow.bold(`${counter} ✗ [USED]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
         logResultToFile('used.txt', rawUrl);
-        logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl);
+        logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
       } else {
         // 3. AVAILABLE / VALID
         stats.available++;
         const promo = extractGoogleOneDetails(pageData.html);
 
-        console.log(chalk.green.bold(`${counter} ✓ [AVAILABLE / VALID]`));
+        console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Paket    : `) + chalk.cyan(promo.plan));
         console.log(chalk.gray(`      Promo    : `) + chalk.green.bold(promo.duration));
@@ -354,17 +481,16 @@ async function checkWithPuppeteer(links) {
         console.log('');
 
         logResultToFile('available_links.txt', rawUrl);
-        logResultToFile('available.txt', `${rawUrl} | ${promo.summary}`);
-        logResultToCsv(itemNo, 'AVAILABLE', promo.plan, promo.duration, promo.expiry, rawUrl);
+        logResultToCsv(itemNo, 'AVAILABLE', promo.plan, promo.duration, promo.expiry, rawUrl, now);
       }
 
     } catch (err) {
       stats.error++;
-      console.log(chalk.red.bold(`${counter} ! [ERROR]`));
+      console.log(`${counter} ${timeBadge} ` + chalk.red.bold('! [ERROR]'));
       console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
       console.log(chalk.gray(`      Pesan    : `) + chalk.red(err.message) + '\n');
       logResultToFile('errors.txt', `${rawUrl} | Error: ${err.message}`);
-      logResultToCsv(itemNo, 'ERROR', '-', '-', '-', rawUrl);
+      logResultToCsv(itemNo, 'ERROR', '-', '-', '-', rawUrl, now);
     }
 
     if (i < links.length - 1 && config.delayMs > 0) {
@@ -377,6 +503,7 @@ async function checkWithPuppeteer(links) {
 }
 
 async function main() {
+  const startTime = new Date();
   initResultsDirectory();
 
   const links = readLinksFromFile(config.linksFile);
@@ -386,18 +513,26 @@ async function main() {
     process.exit(0);
   }
 
-  if (config.keywords.length === 0) {
-    console.log(chalk.red('\n[!] Error: TARGET_KEYWORDS belum ditentukan di .env!\n'));
-    process.exit(1);
+  // Coba perpanjang / rotasi cookie otomatis saat start jika cookie tersedia
+  let cookieStatus = chalk.red('Tidak ada');
+  if (config.cookie) {
+    const rotated = await tryRotateCookies(config.cookie);
+    if (rotated) {
+      config.cookie = rotated;
+      cookieStatus = chalk.green('Aktif (Auto-Refreshed 🔄)');
+    } else {
+      cookieStatus = chalk.green('Aktif');
+    }
   }
 
   console.log(chalk.cyan.bold('\n============================================================'));
   console.log(chalk.cyan.bold('              GOOGLE ONE / GEMINI LINK CHECKER              '));
   console.log(chalk.cyan.bold('============================================================'));
   console.log(
+    chalk.white(`  Waktu Mulai: `) + chalk.yellow.bold(formatHumanDateTime(startTime)) + '\n' +
     chalk.white(`  Total Link : `) + chalk.bold(links.length) + '\n' +
     chalk.white(`  Mode Mesin : `) + chalk.green.bold(config.engine === 'FETCH' ? 'FAST FETCH (HTTP Request)' : 'PUPPETEER (Browser)') + '\n' +
-    chalk.white(`  Sesi Cookie: `) + (config.cookie ? chalk.green('Aktif (Valid)') : chalk.red('Tidak ada'))
+    chalk.white(`  Sesi Cookie: `) + cookieStatus
   );
   console.log(chalk.cyan.bold('============================================================\n'));
 
@@ -405,10 +540,48 @@ async function main() {
     ? await checkWithPuppeteer(links)
     : await checkWithFetch(links);
 
-  // Ringkasan hasil rapi
+  const endTime = new Date();
+  const durationSec = Math.round((endTime - startTime) / 1000);
+
+  // Tulis header keterangan waktu di file output results/available_links.txt
+  const availablePath = path.join(config.resultsDir, 'available_links.txt');
+  if (fs.existsSync(availablePath)) {
+    const content = fs.readFileSync(availablePath, 'utf8').trim();
+    const headerInfo = [
+      `# ============================================================`,
+      `# HASIL PENGECEKAN LINK AKTIF (VALID / BISA DIKLAIM)`,
+      `# Waktu Pengecekan : ${formatHumanDateTime(endTime)}`,
+      `# Total Ditemukan  : ${stats.available} dari ${stats.total} link`,
+      `# ============================================================`,
+      ``
+    ].join('\n');
+    fs.writeFileSync(availablePath, content ? `${headerInfo}${content}\n` : '', 'utf8');
+  }
+
+  // Tulis header di results/used.txt
+  const usedPath = path.join(config.resultsDir, 'used.txt');
+  if (fs.existsSync(usedPath)) {
+    const content = fs.readFileSync(usedPath, 'utf8').trim();
+    if (content) {
+      const headerInfo = [
+        `# ============================================================`,
+        `# DAFTAR LINK HANGUS (SUDAH DIGUNAKAN)`,
+        `# Waktu Pengecekan : ${formatHumanDateTime(endTime)}`,
+        `# Total Hangus     : ${stats.used} link`,
+        `# ============================================================`,
+        ``
+      ].join('\n');
+      fs.writeFileSync(usedPath, `${headerInfo}${content}\n`, 'utf8');
+    }
+  }
+
+  // Ringkasan hasil rapi dengan waktu lengkap
   console.log(chalk.cyan.bold('============================================================'));
   console.log(chalk.cyan.bold('                      RINGKASAN HASIL                       '));
   console.log(chalk.cyan.bold('============================================================'));
+  console.log(chalk.white(`  Waktu Selesai            : `) + chalk.yellow(formatHumanDateTime(endTime)));
+  console.log(chalk.white(`  Durasi Pengecekan        : `) + chalk.cyan(`${durationSec} detik`));
+  console.log(chalk.gray('------------------------------------------------------------'));
   console.log(
     chalk.green.bold(`  ✓ AVAILABLE (Siap Pakai) : `) +
     chalk.green.bold(`${stats.available} link`) +
