@@ -1,0 +1,5 @@
+# Tempelkan daftar URL yang ingin diperiksa di sini (1 per baris)
+# Baris yang diawali '#' akan diabaikan
+# Contoh:
+# https://one.google.com/activate-plan/subscription/new/EXAMPLE_TOKEN?pli=1&g1_landing_page=5
+# https://serviceactivation.google.com/subscription/new/EXAMPLE_TOKEN

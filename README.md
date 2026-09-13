@@ -1,54 +1,53 @@
 # Google One & Gemini Pro Link Checker (Node.js)
 
-Aplikasi Node.js untuk memeriksa link aktivasi Google One / Gemini Advanced Pro 18 bulan secara massal (*batch*), dilengkapi dengan fitur **Auto-Refresh Cookie** dan **Pencatatan Waktu Lengkap**.
+> ⚠️ **DISCLAIMER / UNTUK TUJUAN PEMBELAJARAN & EDUKASI**
+> Proyek ini dibuat semata-mata untuk tujuan riset teknis, eksplorasi teknologi Node.js, dan edukasi seputar otomatisasi HTTP request, session cookie handling, serta web scraping/automation.
+> Proyek ini tidak berafiliasi dengan Google LLC. Penggunaan alat ini sepenuhnya merupakan tanggung jawab masing-masing pengguna. Penulis tidak bertanggung jawab atas segala bentuk penyalahgunaan alat ini.
 
 ---
 
-## ⚡ Fitur Unggulan
+## 📖 Deskripsi Proyek
 
-1. **🔄 Auto-Rotate Cookie**:
-   - Terintegrasi dengan endpoint resmi Google `https://accounts.google.com/RotateCookies`.
-   - Secara otomatis memperbarui masa aktif cookie sesi (`SIDTS` & `SIDCC`) dan menyimpannya kembali ke file `.env`, sehingga cookie tidak mudah kedaluwarsa.
-2. **🕒 Penanda Waktu Lengkap (Timestamp)**:
-   - Waktu mulai & selesai pengecekan tertera di terminal beserta durasi detik.
-   - Setiap link memiliki jam pengecekan real-time.
-   - File output (`results/available_links.txt` dan `results/summary.csv`) dilengkapi tanggal dan jam WIB.
-3. **🌐 Normalisasi Link Otomatis**:
-   - Mendukung format langsung `one.google.com` maupun format redirector `serviceactivation.google.com`.
+Aplikasi batch checker berbasis Node.js untuk memeriksa validitas dan ketersediaan tautan promo aktivasi layanan (seperti Google One / Gemini AI Pro) secara massal (*batch*), memverifikasi apakah tautan masih aktif atau sudah pernah diklaim.
+
+### ✨ Fitur Utama:
+- ⚡ **Super Cepat (Fast Fetch)**: Menggunakan HTTP Request native yang ringan (~1-2 detik per link).
+- 🔄 **Auto-Rotate Session Cookie**: Otomatis memperbarui cookie sesi sementara (`RotateCookies`) agar tidak cepat kedaluwarsa.
+- 🕒 **Pencatatan Waktu Lengkap**: Menampilkan waktu mulai, durasi eksekusi, serta jam real-time per link.
+- 📊 **Export Hasil Rapi**:
+  - `results/available_links.txt` : Kumpulan tautan yang valid dan masih aktif (siap disalin).
+  - `results/used.txt` : Tautan yang sudah pernah digunakan.
+  - `results/summary.csv` : Rekapitulasi tabel lengkap (kompatibel langsung dengan Microsoft Excel / Google Sheets).
 
 ---
 
-## 🖥️ Contoh Tampilan Terminal
+## 🖥️ Contoh Output Terminal
 
 ```text
 ============================================================
               GOOGLE ONE / GEMINI LINK CHECKER              
 ============================================================
-  Waktu Mulai: 12 Sep 2026, 16:24:55 WIB
-  Total Link : 12
+  Waktu Mulai: 13 Sep 2026, 11:17:40 WIB
+  Total Link : 9
   Mode Mesin : FAST FETCH (HTTP Request)
   Sesi Cookie: Aktif (Auto-Refreshed 🔄)
 ============================================================
 
-[1/12] [16:24:56] ✗ [USED]
-      URL      : https://one.google.com/activate-plan/subsc...&g1_landing_page=5
-      Catatan  : Sudah pernah digunakan / hangus
-
-[2/12] [16:24:59] ✓ [AVAILABLE / VALID]
-      URL      : https://one.google.com/activate-plan/subsc...&g1_landing_page=5
+[1/9] [11:17:40] ✓ [AVAILABLE / VALID]
+      URL      : https://one.google.com/activate-plan/subsc...L4Gs35VO6R-4HUeQ==
       Paket    : Google AI Pro Anda dari Jio
       Promo    : gratis selama 18 bulan
-      Berakhir : 12 Mar 2028
+      Berakhir : 13 Mar 2028
       Tombol   : [Aktifkan paket] Siap Klaim!
 
 ============================================================
                       RINGKASAN HASIL                       
 ============================================================
-  Waktu Selesai            : 12 Sep 2026, 16:25:26 WIB
-  Durasi Pengecekan        : 31 detik
+  Waktu Selesai            : 13 Sep 2026, 11:18:03 WIB
+  Durasi Pengecekan        : 23 detik
 ------------------------------------------------------------
-  ✓ AVAILABLE (Siap Pakai) : 11 link -> results/available_links.txt
-  ✗ USED (Hangus)          : 1 link  -> results/used.txt
+  ✓ AVAILABLE (Siap Pakai) : 9 link -> results/available_links.txt
+  ✗ USED (Hangus)          : 0 link -> results/used.txt
 ------------------------------------------------------------
   📊 Tabel Lengkap Excel   : results/summary.csv
 ============================================================
@@ -56,10 +55,39 @@ Aplikasi Node.js untuk memeriksa link aktivasi Google One / Gemini Advanced Pro 
 
 ---
 
-## 🚀 Cara Penggunaan
+## 🛠️ Panduan Instalasi & Penggunaan
 
-1. Buka [links.txt](file:///d:/Coding/gemini-ai-pro-18months-checker/links.txt) dan tempelkan daftar URL.
-2. Jalankan:
-   - Klik 2x file [run.bat](file:///d:/Coding/gemini-ai-pro-18months-checker/run.bat)
-   - Atau ketik `npm start` di terminal.
-3. Ambil link aktif di `results/available_links.txt`!
+### 1. Prasyarat
+- [Node.js](https://nodejs.org/) (versi 18 ke atas)
+
+### 2. Instalasi
+Clone repository ini dan install dependensinya:
+```bash
+git clone https://github.com/bitsmith826/gemini-ai-pro-18months-checker.git
+cd gemini-ai-pro-18months-checker
+npm install
+```
+
+### 3. Konfigurasi
+1. Salin template konfigurasi:
+   ```bash
+   cp .env.example .env
+   ```
+2. Buka file `.env` dan masukkan cookie sesi Google Anda pada variabel `GOOGLE_COOKIE`.
+3. Buat file `links.txt` (atau salin dari `links.example.txt`):
+   ```bash
+   cp links.example.txt links.txt
+   ```
+4. Tempelkan daftar tautan yang ingin diperiksa ke dalam `links.txt` (1 baris per link).
+
+### 4. Menjalankan Script
+Jalankan perintah:
+```bash
+npm start
+```
+Atau di Windows cukup klik dua kali file `run.bat`.
+
+---
+
+## 📄 Lisensi
+Didistribusikan di bawah Lisensi MIT. Bebas digunakan untuk tujuan edukasi dan pengembangan pribadi.
