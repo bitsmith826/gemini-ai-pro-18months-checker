@@ -46,6 +46,73 @@ function formatTimeOnly(date = new Date()) {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+// Otomatis mencari dan menyinkronkan cookie Google (seperti di gemini-jio)
+async function resolveGoogleCookies() {
+  let panelUrl = process.env.PANEL_API_URL;
+  let panelKey = process.env.PANEL_API_KEY;
+  let panelServer = process.env.PANEL_SERVER_ID;
+  let panelPath = process.env.PANEL_COOKIE_PATH || '/google_keepalive/google_cookies.json';
+
+  // 1. Coba deteksi kredensial panel dari ../gemini-jio/.env jika di folder lokal belum diset
+  const neighborEnv = path.resolve('../gemini-jio/.env');
+  if ((!panelUrl || !panelKey) && fs.existsSync(neighborEnv)) {
+    try {
+      const lines = fs.readFileSync(neighborEnv, 'utf8').split('\n');
+      for (const line of lines) {
+        const match = line.match(/^([A-Z_]+)\s*=\s*["']?(.*?)["']?$/);
+        if (match) {
+          if (match[1] === 'PANEL_API_URL') panelUrl = match[2];
+          if (match[1] === 'PANEL_API_KEY') panelKey = match[2];
+          if (match[1] === 'PANEL_SERVER_ID') panelServer = match[2];
+          if (match[1] === 'PANEL_COOKIE_PATH') panelPath = match[2];
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 2. Tarik langsung dari Panel API Pterodactyl (Real-time auto-sync)
+  if (panelUrl && panelKey && panelServer) {
+    try {
+      const url = panelUrl.replace(/\/+$/, '') + '/api/client/servers/' + encodeURIComponent(panelServer) +
+          '/files/contents?file=' + encodeURIComponent(panelPath);
+      const res = await fetch(url, {
+          headers: { 'Authorization': 'Bearer ' + panelKey, 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(10000)
+      });
+      if (res.ok) {
+        const data = JSON.parse(await res.text());
+        fs.writeFileSync('google_cookies.json', JSON.stringify(data, null, 2), 'utf8');
+        const cookieStr = Object.entries(data).map(([k, v]) => `${k}=${v}`).join('; ');
+        return { cookie: cookieStr, label: 'Otomatis dari Panel (Auto-Sync 🔄)' };
+      }
+    } catch (_) {}
+  }
+
+  // 3. Cek file google_cookies.json lokal atau di ../gemini-jio/
+  const candidateFiles = [
+    path.resolve('google_cookies.json'),
+    path.resolve('../gemini-jio/google_cookies.json')
+  ];
+  for (const cf of candidateFiles) {
+    if (fs.existsSync(cf)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(cf, 'utf8'));
+        const cookieStr = Object.entries(data).map(([k, v]) => `${k}=${v}`).join('; ');
+        if (cookieStr) {
+          return { cookie: cookieStr, label: `Otomatis dari ${path.basename(cf)}` };
+        }
+      } catch (_) {}
+    }
+  }
+
+  // 4. Fallback ke GOOGLE_COOKIE di .env
+  if (process.env.GOOGLE_COOKIE) {
+    return { cookie: process.env.GOOGLE_COOKIE, label: 'Manual dari .env' };
+  }
+
+  return { cookie: '', label: 'Tidak ada' };
+}
+
 // Otomatis memperbarui cookie Google via endpoint RotateCookies
 async function tryRotateCookies(currentCookie) {
   if (!currentCookie) return null;
@@ -68,7 +135,6 @@ async function tryRotateCookies(currentCookie) {
     const setCookies = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
     if (!setCookies || setCookies.length === 0) return null;
 
-    // Gabungkan cookie lama dengan cookie baru yang dirotasi
     const cookieMap = new Map();
     currentCookie.split(';').forEach(c => {
       const parts = c.trim().split('=');
@@ -87,17 +153,11 @@ async function tryRotateCookies(currentCookie) {
 
     const newCookie = Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
 
-    // Simpan cookie baru kembali ke file .env
+    // Simpan juga ke file google_cookies.json lokal
     try {
-      const envPath = path.resolve('.env');
-      if (fs.existsSync(envPath)) {
-        let envContent = fs.readFileSync(envPath, 'utf8');
-        envContent = envContent.replace(/GOOGLE_COOKIE=".*?"/s, `GOOGLE_COOKIE="${newCookie}"`);
-        fs.writeFileSync(envPath, envContent, 'utf8');
-      }
-    } catch (e) {
-      // Abaikan jika gagal tulis ke .env
-    }
+      const obj = Object.fromEntries(cookieMap.entries());
+      fs.writeFileSync('google_cookies.json', JSON.stringify(obj, null, 2), 'utf8');
+    } catch (_) {}
 
     return newCookie;
   } catch (err) {
@@ -212,7 +272,7 @@ function parseCookiesForPuppeteer(cookieStr, domain = '.google.com') {
 }
 
 // Pemeriksaan dengan engine FETCH (Super Cepat)
-async function checkWithFetch(links) {
+async function checkWithFetch(links, activeCookie) {
   const stats = { total: links.length, available: 0, used: 0, needLogin: 0, error: 0 };
 
   const getHeaders = (cookieVal) => ({
@@ -227,7 +287,7 @@ async function checkWithFetch(links) {
     ...(cookieVal ? { 'Cookie': cookieVal } : {})
   });
 
-  let activeCookie = config.cookie;
+  let currentCookie = activeCookie;
 
   for (let i = 0; i < links.length; i++) {
     const itemNo = i + 1;
@@ -251,7 +311,7 @@ async function checkWithFetch(links) {
 
     try {
       let response = await fetch(rawUrl, {
-        headers: getHeaders(activeCookie),
+        headers: getHeaders(currentCookie),
         redirect: 'follow'
       });
 
@@ -266,13 +326,11 @@ async function checkWithFetch(links) {
 
       // Jika terlempar ke login, coba auto-refresh via RotateCookies sekali
       if (isLoginRedirect) {
-        const rotated = await tryRotateCookies(activeCookie);
+        const rotated = await tryRotateCookies(currentCookie);
         if (rotated) {
-          activeCookie = rotated;
-          config.cookie = rotated;
-          // Retry link dengan cookie yang baru dirotasi
+          currentCookie = rotated;
           response = await fetch(rawUrl, {
-            headers: getHeaders(activeCookie),
+            headers: getHeaders(currentCookie),
             redirect: 'follow'
           });
           finalUrl = response.url;
@@ -288,7 +346,7 @@ async function checkWithFetch(links) {
         stats.needLogin++;
         console.log(`${counter} ${timeBadge} ` + chalk.magenta.bold('⚠️  [NEED_LOGIN]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Sesi cookie kedaluwarsa (perlu login ulang)\n'));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Sesi cookie kedaluwarsa (perlu update sesi)\n'));
         logResultToFile('need_login.txt', rawUrl);
         logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl, now);
         continue;
@@ -350,7 +408,7 @@ async function checkWithFetch(links) {
 }
 
 // Pemeriksaan dengan engine PUPPETEER (Browser Automation)
-async function checkWithPuppeteer(links) {
+async function checkWithPuppeteer(links, activeCookie) {
   const stats = { total: links.length, available: 0, used: 0, needLogin: 0, error: 0 };
 
   console.log(chalk.gray('⏳ Membuka browser Chromium...'));
@@ -372,8 +430,8 @@ async function checkWithPuppeteer(links) {
     'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7'
   });
 
-  if (config.cookie) {
-    const cookies = parseCookiesForPuppeteer(config.cookie);
+  if (activeCookie) {
+    const cookies = parseCookiesForPuppeteer(activeCookie);
     if (cookies.length > 0) {
       await page.setCookie(...cookies);
     }
@@ -513,15 +571,17 @@ async function main() {
     process.exit(0);
   }
 
-  // Coba perpanjang / rotasi cookie otomatis saat start jika cookie tersedia
-  let cookieStatus = chalk.red('Tidak ada');
-  if (config.cookie) {
-    const rotated = await tryRotateCookies(config.cookie);
+  // 1. Dapatkan cookie secara otomatis (Panel API / google_cookies.json / .env)
+  const cookieResolution = await resolveGoogleCookies();
+  let activeCookie = cookieResolution.cookie;
+  let cookieStatusLabel = cookieResolution.label;
+
+  // 2. Jika ada cookie, coba lakukan rotation check agar semakin segar
+  if (activeCookie) {
+    const rotated = await tryRotateCookies(activeCookie);
     if (rotated) {
-      config.cookie = rotated;
-      cookieStatus = chalk.green('Aktif (Auto-Refreshed 🔄)');
-    } else {
-      cookieStatus = chalk.green('Aktif');
+      activeCookie = rotated;
+      cookieStatusLabel += ' + Auto-Rotated 🔄';
     }
   }
 
@@ -532,13 +592,13 @@ async function main() {
     chalk.white(`  Waktu Mulai: `) + chalk.yellow.bold(formatHumanDateTime(startTime)) + '\n' +
     chalk.white(`  Total Link : `) + chalk.bold(links.length) + '\n' +
     chalk.white(`  Mode Mesin : `) + chalk.green.bold(config.engine === 'FETCH' ? 'FAST FETCH (HTTP Request)' : 'PUPPETEER (Browser)') + '\n' +
-    chalk.white(`  Sesi Cookie: `) + cookieStatus
+    chalk.white(`  Sesi Cookie: `) + (activeCookie ? chalk.green(cookieStatusLabel) : chalk.red('Tidak ada'))
   );
   console.log(chalk.cyan.bold('============================================================\n'));
 
   const stats = config.engine === 'PUPPETEER'
-    ? await checkWithPuppeteer(links)
-    : await checkWithFetch(links);
+    ? await checkWithPuppeteer(links, activeCookie)
+    : await checkWithFetch(links, activeCookie);
 
   const endTime = new Date();
   const durationSec = Math.round((endTime - startTime) / 1000);

@@ -5,6 +5,7 @@ node_modules/
 results/
 .env
 links.txt
+google_cookies.json
 
 # Log & Profil browser
 *.log
