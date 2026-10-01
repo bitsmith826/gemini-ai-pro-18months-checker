@@ -9,7 +9,7 @@ dotenv.config({ quiet: true });
 const config = {
   engine: (process.env.ENGINE || 'FETCH').toUpperCase(),
   cookie: process.env.GOOGLE_COOKIE || '',
-  keywords: (process.env.TARGET_KEYWORDS || 'Langganan sudah digunakan, Link langganan ini sudah digunakan, sudah digunakan')
+  keywords: (process.env.TARGET_KEYWORDS || 'Langganan sudah digunakan, Link langganan ini sudah digunakan, sudah digunakan, Anda memerlukan link aktivasi baru, Minta penyedia Anda untuk mengirimkan link baru, link aktivasi baru, you need a new activation link, ask your provider, tidak valid, invalid')
     .split(',')
     .map(k => k.trim())
     .filter(Boolean),
@@ -233,16 +233,16 @@ function extractTitle(html) {
 
 // Helper ekstrak detail promo Google One / Gemini
 function extractGoogleOneDetails(html) {
-  const planMatch = html.match(/>([^<]*Aktifkan paket[^<]*)</i);
-  const durationMatch = html.match(/>([^<]*gratis selama[^<]*)</i);
-  const expiryMatch = html.match(/>([^<]*akan berakhir pada[^<]*)</i);
-  const buttonMatch = html.match(/>([^<]*Aktifkan[^<]*)</i);
+  const planMatch = html.match(/>([^<]*(?:Aktifkan paket|Activate plan)[^<]*)</i);
+  const durationMatch = html.match(/>([^<]*(?:gratis selama|free for)[^<]*)</i);
+  const expiryMatch = html.match(/>([^<]*(?:akan berakhir pada|will end on)[^<]*)</i);
+  const buttonMatch = html.match(/>([^<]*(?:Aktifkan|Activate|Start trial|Claim)[^<]*)</i);
 
   const plan = planMatch
-    ? planMatch[1].replace(/Aktifkan paket\s*/i, '').replace(/seharga\s*$/i, '').trim()
+    ? planMatch[1].replace(/(?:Aktifkan paket|Activate plan)\s*/i, '').replace(/seharga\s*$/i, '').trim()
     : 'Google One';
   const duration = durationMatch ? durationMatch[1].trim() : '-';
-  const expiry = expiryMatch ? expiryMatch[1].replace(/^.*akan berakhir pada\s*/i, '').trim() : '-';
+  const expiry = expiryMatch ? expiryMatch[1].replace(/^.*(?:akan berakhir pada|will end on)\s*/i, '').trim() : '-';
   const hasButton = !!buttonMatch;
 
   return {
@@ -352,30 +352,54 @@ async function checkWithFetch(links, activeCookie) {
         continue;
       }
 
-      // 2. Cek apakah sudah digunakan (USED)
+      // 2. Cek apakah sudah digunakan atau kedaluwarsa (USED / EXPIRED / INVALID)
       const checkText = config.caseSensitive ? htmlText : htmlText.toLowerCase();
-      const matchedKeywords = [];
-      for (const kw of config.keywords) {
+      
+      const usedKeywords = [
+        ...config.keywords,
+        'anda memerlukan link aktivasi baru',
+        'minta penyedia anda untuk mengirimkan link baru',
+        'link aktivasi baru',
+        'you need a new activation link',
+        'ask your provider to send a new link',
+        'penawaran ini tidak lagi berlaku',
+        'penawaran telah berakhir',
+        'tidak valid',
+        'already been used',
+        'no longer valid',
+        'offer has expired'
+      ];
+
+      let isUsed = false;
+      let matchedReason = 'Sudah pernah digunakan / hangus';
+
+      for (const kw of usedKeywords) {
         const target = config.caseSensitive ? kw : kw.toLowerCase();
         if (checkText.includes(target)) {
-          matchedKeywords.push(kw);
+          isUsed = true;
+          if (target.includes('link aktivasi baru') || target.includes('activation link')) {
+            matchedReason = 'Link kedaluwarsa / hangus (Perlu link baru)';
+          } else if (target.includes('tidak valid') || target.includes('invalid')) {
+            matchedReason = 'Link tidak valid';
+          }
+          break;
         }
       }
 
-      const isUsed = matchedKeywords.length > 0;
+      const promo = extractGoogleOneDetails(htmlText);
+      const hasValidPromo = (promo.hasButton || promo.duration !== '-') && !checkText.includes('link aktivasi baru');
 
-      if (isUsed) {
+      if (isUsed || !hasValidPromo) {
         stats.used++;
+        const finalNote = isUsed ? matchedReason : 'Link tidak memuat promo aktif (Hangus)';
         console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow(`${finalNote}\n`));
         logResultToFile('used.txt', rawUrl);
         logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
       } else {
-        // 3. AVAILABLE / VALID
+        // 3. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
         stats.available++;
-        const promo = extractGoogleOneDetails(htmlText);
-
         console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Paket    : `) + chalk.cyan(promo.plan));
@@ -501,33 +525,56 @@ async function checkWithPuppeteer(links, activeCookie) {
         continue;
       }
 
-      // 2. Cek apakah sudah digunakan (USED)
+      // 2. Cek apakah sudah digunakan atau kedaluwarsa (USED / EXPIRED / INVALID)
       const fullText = config.caseSensitive
         ? `${pageData.title}\n${pageData.bodyText}\n${pageData.html}`
         : `${pageData.title}\n${pageData.bodyText}\n${pageData.html}`.toLowerCase();
 
-      const matchedKeywords = [];
-      for (const kw of config.keywords) {
+      const usedKeywords = [
+        ...config.keywords,
+        'anda memerlukan link aktivasi baru',
+        'minta penyedia anda untuk mengirimkan link baru',
+        'link aktivasi baru',
+        'you need a new activation link',
+        'ask your provider to send a new link',
+        'penawaran ini tidak lagi berlaku',
+        'penawaran telah berakhir',
+        'tidak valid',
+        'already been used',
+        'no longer valid',
+        'offer has expired'
+      ];
+
+      let isUsed = false;
+      let matchedReason = 'Sudah pernah digunakan / hangus';
+
+      for (const kw of usedKeywords) {
         const target = config.caseSensitive ? kw : kw.toLowerCase();
         if (fullText.includes(target)) {
-          matchedKeywords.push(kw);
+          isUsed = true;
+          if (target.includes('link aktivasi baru') || target.includes('activation link')) {
+            matchedReason = 'Link kedaluwarsa / hangus (Perlu link baru)';
+          } else if (target.includes('tidak valid') || target.includes('invalid')) {
+            matchedReason = 'Link tidak valid';
+          }
+          break;
         }
       }
 
-      const isUsed = matchedKeywords.length > 0;
+      const promo = extractGoogleOneDetails(pageData.html);
+      const hasValidPromo = (promo.hasButton || promo.duration !== '-') && !fullText.includes('link aktivasi baru');
 
-      if (isUsed) {
+      if (isUsed || !hasValidPromo) {
         stats.used++;
+        const finalNote = isUsed ? matchedReason : 'Link tidak memuat promo aktif (Hangus)';
         console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow(`${finalNote}\n`));
         logResultToFile('used.txt', rawUrl);
         logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
       } else {
-        // 3. AVAILABLE / VALID
+        // 3. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
         stats.available++;
-        const promo = extractGoogleOneDetails(pageData.html);
-
         console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
         console.log(chalk.gray(`      Paket    : `) + chalk.cyan(promo.plan));
