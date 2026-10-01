@@ -182,6 +182,8 @@ function initResultsDirectory() {
   // Reset file output utama
   fs.writeFileSync(path.join(config.resultsDir, 'available_links.txt'), '', 'utf8');
   fs.writeFileSync(path.join(config.resultsDir, 'used.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(config.resultsDir, 'need_new_link.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(config.resultsDir, 'need_login.txt'), '', 'utf8');
 }
 
 // Baca daftar link dari file
@@ -273,7 +275,7 @@ function parseCookiesForPuppeteer(cookieStr, domain = '.google.com') {
 
 // Pemeriksaan dengan engine FETCH (Super Cepat)
 async function checkWithFetch(links, activeCookie) {
-  const stats = { total: links.length, available: 0, used: 0, needLogin: 0, error: 0 };
+  const stats = { total: links.length, available: 0, used: 0, needNewLink: 0, needLogin: 0, error: 0 };
 
   const getHeaders = (cookieVal) => ({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -352,53 +354,58 @@ async function checkWithFetch(links, activeCookie) {
         continue;
       }
 
-      // 2. Cek apakah sudah digunakan atau kedaluwarsa (USED / EXPIRED / INVALID)
       const checkText = config.caseSensitive ? htmlText : htmlText.toLowerCase();
-      
+
+      // 2. Cek apakah sudah pernah digunakan (USED)
       const usedKeywords = [
-        ...config.keywords,
+        'langganan sudah digunakan',
+        'link langganan ini sudah digunakan',
+        'sudah digunakan',
+        'already been redeemed',
+        'already redeemed',
+        'already claimed',
+        'already been claimed',
+        'already been used',
+        'already used'
+      ];
+      const isUsed = usedKeywords.some(kw => checkText.includes(kw));
+
+      // 3. Cek apakah memerlukan link aktivasi baru (NEED_NEW_LINK)
+      const needNewLinkKeywords = [
         'anda memerlukan link aktivasi baru',
         'minta penyedia anda untuk mengirimkan link baru',
         'link aktivasi baru',
         'you need a new activation link',
         'ask your provider to send a new link',
+        'ask your provider',
         'penawaran ini tidak lagi berlaku',
         'penawaran telah berakhir',
         'tidak valid',
-        'already been used',
+        'invalid',
         'no longer valid',
         'offer has expired'
       ];
-
-      let isUsed = false;
-      let matchedReason = 'Sudah pernah digunakan / hangus';
-
-      for (const kw of usedKeywords) {
-        const target = config.caseSensitive ? kw : kw.toLowerCase();
-        if (checkText.includes(target)) {
-          isUsed = true;
-          if (target.includes('link aktivasi baru') || target.includes('activation link')) {
-            matchedReason = 'Link kedaluwarsa / hangus (Perlu link baru)';
-          } else if (target.includes('tidak valid') || target.includes('invalid')) {
-            matchedReason = 'Link tidak valid';
-          }
-          break;
-        }
-      }
+      const isNeedNew = needNewLinkKeywords.some(kw => checkText.includes(kw));
 
       const promo = extractGoogleOneDetails(htmlText);
       const hasValidPromo = (promo.hasButton || promo.duration !== '-') && !checkText.includes('link aktivasi baru');
 
-      if (isUsed || !hasValidPromo) {
+      if (isUsed) {
         stats.used++;
-        const finalNote = isUsed ? matchedReason : 'Link tidak memuat promo aktif (Hangus)';
         console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow(`${finalNote}\n`));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
         logResultToFile('used.txt', rawUrl);
         logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
+      } else if (isNeedNew || !hasValidPromo) {
+        stats.needNewLink++;
+        console.log(`${counter} ${timeBadge} ` + chalk.blueBright.bold('🔄 [NEED_NEW_LINK]'));
+        console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.blueBright('Perlu link aktivasi baru (Minta penyedia link baru)\n'));
+        logResultToFile('need_new_link.txt', rawUrl);
+        logResultToCsv(itemNo, 'NEED_NEW_LINK', '-', '-', '-', rawUrl, now);
       } else {
-        // 3. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
+        // 4. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
         stats.available++;
         console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
@@ -433,7 +440,7 @@ async function checkWithFetch(links, activeCookie) {
 
 // Pemeriksaan dengan engine PUPPETEER (Browser Automation)
 async function checkWithPuppeteer(links, activeCookie) {
-  const stats = { total: links.length, available: 0, used: 0, needLogin: 0, error: 0 };
+  const stats = { total: links.length, available: 0, used: 0, needNewLink: 0, needLogin: 0, error: 0 };
 
   console.log(chalk.gray('⏳ Membuka browser Chromium...'));
   const browser = await puppeteer.launch({
@@ -530,50 +537,56 @@ async function checkWithPuppeteer(links, activeCookie) {
         ? `${pageData.title}\n${pageData.bodyText}\n${pageData.html}`
         : `${pageData.title}\n${pageData.bodyText}\n${pageData.html}`.toLowerCase();
 
+      // 2. Cek apakah sudah pernah digunakan (USED)
       const usedKeywords = [
-        ...config.keywords,
+        'langganan sudah digunakan',
+        'link langganan ini sudah digunakan',
+        'sudah digunakan',
+        'already been redeemed',
+        'already redeemed',
+        'already claimed',
+        'already been claimed',
+        'already been used',
+        'already used'
+      ];
+      const isUsed = usedKeywords.some(kw => fullText.includes(kw));
+
+      // 3. Cek apakah memerlukan link aktivasi baru (NEED_NEW_LINK)
+      const needNewLinkKeywords = [
         'anda memerlukan link aktivasi baru',
         'minta penyedia anda untuk mengirimkan link baru',
         'link aktivasi baru',
         'you need a new activation link',
         'ask your provider to send a new link',
+        'ask your provider',
         'penawaran ini tidak lagi berlaku',
         'penawaran telah berakhir',
         'tidak valid',
-        'already been used',
+        'invalid',
         'no longer valid',
         'offer has expired'
       ];
-
-      let isUsed = false;
-      let matchedReason = 'Sudah pernah digunakan / hangus';
-
-      for (const kw of usedKeywords) {
-        const target = config.caseSensitive ? kw : kw.toLowerCase();
-        if (fullText.includes(target)) {
-          isUsed = true;
-          if (target.includes('link aktivasi baru') || target.includes('activation link')) {
-            matchedReason = 'Link kedaluwarsa / hangus (Perlu link baru)';
-          } else if (target.includes('tidak valid') || target.includes('invalid')) {
-            matchedReason = 'Link tidak valid';
-          }
-          break;
-        }
-      }
+      const isNeedNew = needNewLinkKeywords.some(kw => fullText.includes(kw));
 
       const promo = extractGoogleOneDetails(pageData.html);
       const hasValidPromo = (promo.hasButton || promo.duration !== '-') && !fullText.includes('link aktivasi baru');
 
-      if (isUsed || !hasValidPromo) {
+      if (isUsed) {
         stats.used++;
-        const finalNote = isUsed ? matchedReason : 'Link tidak memuat promo aktif (Hangus)';
         console.log(`${counter} ${timeBadge} ` + chalk.yellow.bold('✗ [USED]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
-        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow(`${finalNote}\n`));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.yellow('Sudah pernah digunakan / hangus\n'));
         logResultToFile('used.txt', rawUrl);
         logResultToCsv(itemNo, 'USED', '-', '-', '-', rawUrl, now);
+      } else if (isNeedNew || !hasValidPromo) {
+        stats.needNewLink++;
+        console.log(`${counter} ${timeBadge} ` + chalk.blueBright.bold('🔄 [NEED_NEW_LINK]'));
+        console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
+        console.log(chalk.gray(`      Catatan  : `) + chalk.blueBright('Perlu link aktivasi baru (Minta penyedia link baru)\n'));
+        logResultToFile('need_new_link.txt', rawUrl);
+        logResultToCsv(itemNo, 'NEED_NEW_LINK', '-', '-', '-', rawUrl, now);
       } else {
-        // 3. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
+        // 4. AVAILABLE / VALID (Hanya jika promo aktif & tombol klaim terkonfirmasi)
         stats.available++;
         console.log(`${counter} ${timeBadge} ` + chalk.green.bold('✓ [AVAILABLE / VALID]'));
         console.log(chalk.gray(`      URL      : `) + chalk.white(shortUrl));
@@ -682,6 +695,23 @@ async function main() {
     }
   }
 
+  // Tulis header di results/need_new_link.txt
+  const needNewLinkPath = path.join(config.resultsDir, 'need_new_link.txt');
+  if (fs.existsSync(needNewLinkPath)) {
+    const content = fs.readFileSync(needNewLinkPath, 'utf8').trim();
+    if (content) {
+      const headerInfo = [
+        `# ============================================================`,
+        `# DAFTAR LINK KEDALUWARSA (PERLU MINTA LINK AKTIVASI BARU)`,
+        `# Waktu Pengecekan : ${formatHumanDateTime(endTime)}`,
+        `# Total Perlu Baru : ${stats.needNewLink} link`,
+        `# ============================================================`,
+        ``
+      ].join('\n');
+      fs.writeFileSync(needNewLinkPath, `${headerInfo}${content}\n`, 'utf8');
+    }
+  }
+
   // Ringkasan hasil rapi dengan waktu lengkap
   console.log(chalk.cyan.bold('============================================================'));
   console.log(chalk.cyan.bold('                      RINGKASAN HASIL                       '));
@@ -695,10 +725,17 @@ async function main() {
     chalk.gray(` -> results/available_links.txt`)
   );
   console.log(
-    chalk.yellow.bold(`  ✗ USED (Hangus)          : `) +
+    chalk.yellow.bold(`  ✗ USED (Sudah Dipakai)   : `) +
     chalk.yellow.bold(`${stats.used} link`) +
     chalk.gray(` -> results/used.txt`)
   );
+  if (stats.needNewLink > 0) {
+    console.log(
+      chalk.blueBright.bold(`  🔄 NEED_NEW_LINK (Perlu) : `) +
+      chalk.blueBright.bold(`${stats.needNewLink} link`) +
+      chalk.gray(` -> results/need_new_link.txt`)
+    );
+  }
   if (stats.needLogin > 0) {
     console.log(
       chalk.magenta.bold(`  ⚠️ NEED_LOGIN (Perlu Sesi): `) +
