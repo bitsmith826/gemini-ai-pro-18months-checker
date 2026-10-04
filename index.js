@@ -17,7 +17,8 @@ const config = {
   caseSensitive: process.env.CASE_SENSITIVE === 'true',
   headless: process.env.HEADLESS !== 'false',
   timeoutMs: parseInt(process.env.TIMEOUT_MS || '30000', 10),
-  delayMs: parseInt(process.env.DELAY_MS || '1000', 10),
+  delayMs: parseInt(process.env.DELAY_MS || '300', 10),
+  concurrency: Math.max(1, parseInt(process.env.CONCURRENCY || '5', 10)),
   linksFile: process.env.LINKS_FILE || 'links.txt',
   saveScreenshotOnFound: process.env.SAVE_SCREENSHOT_ON_FOUND === 'true',
   resultsDir: 'results'
@@ -273,7 +274,7 @@ function parseCookiesForPuppeteer(cookieStr, domain = '.google.com') {
     .filter(Boolean);
 }
 
-// Pemeriksaan dengan engine FETCH (Super Cepat)
+// Pemeriksaan dengan engine FETCH (Super Cepat & Konkuren ⚡)
 async function checkWithFetch(links, activeCookie) {
   const stats = { total: links.length, available: 0, used: 0, needNewLink: 0, needLogin: 0, error: 0 };
 
@@ -290,10 +291,53 @@ async function checkWithFetch(links, activeCookie) {
   });
 
   let currentCookie = activeCookie;
+  let isRotating = false;
+  let rotatePromise = null;
 
-  for (let i = 0; i < links.length; i++) {
-    const itemNo = i + 1;
-    let rawUrl = links[i];
+  async function rotateCookieSafely() {
+    if (!isRotating) {
+      isRotating = true;
+      rotatePromise = tryRotateCookies(currentCookie)
+        .then(newCookie => {
+          if (newCookie) currentCookie = newCookie;
+          return newCookie;
+        })
+        .finally(() => {
+          isRotating = false;
+        });
+    }
+    return rotatePromise;
+  }
+
+  const usedKeywords = [
+    'langganan sudah digunakan',
+    'link langganan ini sudah digunakan',
+    'sudah digunakan',
+    'already been redeemed',
+    'already redeemed',
+    'already claimed',
+    'already been claimed',
+    'already been used',
+    'already used'
+  ];
+
+  const needNewLinkKeywords = [
+    'anda memerlukan link aktivasi baru',
+    'minta penyedia anda untuk mengirimkan link baru',
+    'link aktivasi baru',
+    'you need a new activation link',
+    'ask your provider to send a new link',
+    'ask your provider',
+    'penawaran ini tidak lagi berlaku',
+    'penawaran telah berakhir',
+    'tidak valid',
+    'invalid',
+    'no longer valid',
+    'offer has expired'
+  ];
+
+  async function processLink(rawUrlInput, itemNo) {
+    let rawUrl = rawUrlInput;
     if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
       rawUrl = 'https://' + rawUrl;
     }
@@ -328,9 +372,8 @@ async function checkWithFetch(links, activeCookie) {
 
       // Jika terlempar ke login, coba auto-refresh via RotateCookies sekali
       if (isLoginRedirect) {
-        const rotated = await tryRotateCookies(currentCookie);
+        const rotated = await rotateCookieSafely();
         if (rotated) {
-          currentCookie = rotated;
           response = await fetch(rawUrl, {
             headers: getHeaders(currentCookie),
             redirect: 'follow'
@@ -351,42 +394,12 @@ async function checkWithFetch(links, activeCookie) {
         console.log(chalk.gray(`      Catatan  : `) + chalk.magenta('Sesi cookie kedaluwarsa (perlu update sesi)\n'));
         logResultToFile('need_login.txt', rawUrl);
         logResultToCsv(itemNo, 'NEED_LOGIN', '-', '-', '-', rawUrl, now);
-        continue;
+        return;
       }
 
       const checkText = config.caseSensitive ? htmlText : htmlText.toLowerCase();
-
-      // 2. Cek apakah sudah pernah digunakan (USED)
-      const usedKeywords = [
-        'langganan sudah digunakan',
-        'link langganan ini sudah digunakan',
-        'sudah digunakan',
-        'already been redeemed',
-        'already redeemed',
-        'already claimed',
-        'already been claimed',
-        'already been used',
-        'already used'
-      ];
       const isUsed = usedKeywords.some(kw => checkText.includes(kw));
-
-      // 3. Cek apakah memerlukan link aktivasi baru (NEED_NEW_LINK)
-      const needNewLinkKeywords = [
-        'anda memerlukan link aktivasi baru',
-        'minta penyedia anda untuk mengirimkan link baru',
-        'link aktivasi baru',
-        'you need a new activation link',
-        'ask your provider to send a new link',
-        'ask your provider',
-        'penawaran ini tidak lagi berlaku',
-        'penawaran telah berakhir',
-        'tidak valid',
-        'invalid',
-        'no longer valid',
-        'offer has expired'
-      ];
       const isNeedNew = needNewLinkKeywords.some(kw => checkText.includes(kw));
-
       const promo = extractGoogleOneDetails(htmlText);
       const hasValidPromo = (promo.hasButton || promo.duration !== '-') && !checkText.includes('link aktivasi baru');
 
@@ -429,11 +442,24 @@ async function checkWithFetch(links, activeCookie) {
       logResultToFile('errors.txt', `${rawUrl} | Error: ${err.message}`);
       logResultToCsv(itemNo, 'ERROR', '-', '-', '-', rawUrl, now);
     }
+  }
 
-    if (i < links.length - 1 && config.delayMs > 0) {
-      await sleep(config.delayMs);
+  // Worker pool konkuren
+  let cursor = 0;
+  const numWorkers = Math.min(config.concurrency, links.length);
+
+  async function worker() {
+    while (cursor < links.length) {
+      const idx = cursor++;
+      await processLink(links[idx], idx + 1);
+      if (config.delayMs > 0) {
+        await sleep(config.delayMs);
+      }
     }
   }
+
+  const workers = Array.from({ length: numWorkers }, () => worker());
+  await Promise.all(workers);
 
   return stats;
 }
@@ -651,7 +677,7 @@ async function main() {
   console.log(
     chalk.white(`  Waktu Mulai: `) + chalk.yellow.bold(formatHumanDateTime(startTime)) + '\n' +
     chalk.white(`  Total Link : `) + chalk.bold(links.length) + '\n' +
-    chalk.white(`  Mode Mesin : `) + chalk.green.bold(config.engine === 'FETCH' ? 'FAST FETCH (HTTP Request)' : 'PUPPETEER (Browser)') + '\n' +
+    chalk.white(`  Mode Mesin : `) + chalk.green.bold(config.engine === 'FETCH' ? `FAST FETCH (${config.concurrency}x Konkuren ⚡)` : 'PUPPETEER (Browser)') + '\n' +
     chalk.white(`  Sesi Cookie: `) + (activeCookie ? chalk.green(cookieStatusLabel) : chalk.red('Tidak ada'))
   );
   console.log(chalk.cyan.bold('============================================================\n'));
